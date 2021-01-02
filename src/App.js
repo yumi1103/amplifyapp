@@ -1,92 +1,81 @@
-import React, { useState, useEffect } from 'react';
-import logo from './logo.svg';
+import React, { useState, useEffect, useReducer } from 'react';
 import './App.css';
-import { API, Storage } from 'aws-amplify';
+import Amplify, { API, Auth, Storage, graphqlOperation } from 'aws-amplify';
 import { withAuthenticator, AmplifySignOut } from '@aws-amplify/ui-react';
+import config from './aws-exports';
 import { listNotes } from './graphql/queries';
 import { createNote as createNoteMutation, deleteNote as deleteNoteMutation } from './graphql/mutations';
+import { onCreateNote } from './graphql/subscriptions';
+Amplify.configure(config);
 
-const initialFormState = { name: '', description: '' }
+const QUERY = 'QUERY';
+const SUBSCRIPTION = 'SUBSCRIPTION';
+
+const initialState = {
+  todos: [],
+};
+
+const reducer = (state, action) => {
+  switch (action.type) {
+    case QUERY:
+      return {...state, todos: action.todos};
+    case SUBSCRIPTION:
+      return {...state, todos:[...state.todos, action.todo]}
+    default:
+      return state;
+  }
+};
+
+async function createNewTodo() {
+  const todo = { name:  "Todo " + Math.floor(Math.random() * 10) };
+  await API.graphql(graphqlOperation(createNoteMutation, { input: todo }));
+}
 
 function App() {
-  const [notes, setNotes] = useState([]);
-  const [formData, setFormData] = useState(initialFormState);
+ const [state, dispatch] = useReducer(reducer, initialState);
+ const [user, setUser] = useState(null);
 
-  useEffect(() => {
-    fetchNotes();
-  }, []);
+ useEffect(() => {
 
-  async function fetchNotes() {
-    const apiData = await API.graphql({ query: listNotes });
-    const notesFromAPI = apiData.data.listNotes.items;
-    await Promise.all(notesFromAPI.map(async note => {
-      if(note.image){
-        const image = await Storage.get(note.image);
-        note.image = image;
+  async function getUser(){
+    const user = await Auth.currentUserInfo();
+    setUser(user);
+    return user
+  }
+
+  getUser();
+
+  async function getData() {
+    const listNotesData = await API.graphql(graphqlOperation(listNotes));
+    dispatch({ type: QUERY, todos: listNotesData.data.listNotes.items });
+  }
+
+  getData();
+
+  let subscription;
+  getUser().then((user) => {
+    subscription = API.graphql(graphqlOperation(onCreateNote, {owner: user.username})).subscribe({
+      next: (eventData) => {
+        const todo = eventData.value.data.onCreateNote;
+        dispatch({ type: SUBSCRIPTION, todo });
       }
-      return note;
-    }))
-    setNotes(apiData.data.listNotes.items);
-  }
-
-  async function createNote() {
-    if (!formData.name || !formData.description) return;
-    await API.graphql({ query: createNoteMutation, variables: { input: formData } });
-    if (formData.image) {
-      const image = await Storage.get(formData.image);
-      formData.image = image;
-    }
-    setNotes([ ...notes, formData ]);
-    setFormData(initialFormState);
-  }
-
-  async function deleteNote({ id }) {
-    const newNotesArray = notes.filter(note => note.id !== id);
-    setNotes(newNotesArray);
-    await API.graphql({ query: deleteNoteMutation, variables: { input: { id } }});
-  }
-
-  async function onChange(e) {
-    if (!e.target.files[0]) return
-    const file = e.target.files[0];
-    setFormData({ ...formData, image: file.name });
-    await Storage.put(file.name, file);
-    fetchNotes();
-  }
+    });
+  });
+  return () => subscription.unsubscribe();
+}, []);
 
   return (
-    <div className="App">
-      <h1>My Notes App</h1>
-      <input
-        onChange={e => setFormData({ ...formData, 'name': e.target.value})}
-        placeholder="Note name"
-        value={formData.name}
-      />
-      <input
-        onChange={e => setFormData({ ...formData, 'description': e.target.value})}
-        placeholder="Note description"
-        value={formData.description}
-      />
-      <input
-        type="file"
-        onChange={onChange}
-      />
-      <button onClick={createNote}>Create Note</button>
-      <div style={{marginBottom: 30}}>
-        {
-          notes.map(note => (
-            <div key={note.id || note.name}>
-              <h2>{note.name}</h2>
-              <p>{note.description}</p>
-              <button onClick={() => deleteNote(note)}>Delete note</button>
-              {
-                note.image && <img src={note.image} style={{width: 400}} />
-              }
-            </div>
-          ))
+   <div className="App">
+     <h1>My Notes App</h1>
+      <p>user: {user!= null && user.username}</p>
+      <AmplifySignOut />
+      <button onClick={createNewTodo}>Add Todo</button>
+      <div>
+        {state.todos.length > 0 ? 
+          state.todos.map((todo) => <p key={todo.id}>{todo.name} ({todo.createdAt})</p>) :
+          <p>Add some todos!</p> 
         }
       </div>
-      <AmplifySignOut />
     </div>
   );
 }
